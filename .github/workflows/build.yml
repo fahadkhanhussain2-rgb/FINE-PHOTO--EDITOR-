@@ -2,11 +2,9 @@ name: Build FINE Photo Editor
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -36,38 +34,47 @@ jobs:
         with:
           gradle-version: '8.2'
 
-      - name: Find ZIP
-        run: |
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found."
-            ls -la
-            exit 1
-          fi
-
-          echo "ZIP found: $ZIP_FILE"
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
-
-      - name: Extract ZIP
+      - name: Extract all ZIP files
         run: |
           rm -rf project
           mkdir -p project
 
-          unzip -q "$ZIP_FILE" -d project
+          echo "Searching for ZIP files..."
 
-          echo "ZIP contents:"
+          find . -type f -iname "*.zip" -print
+
+          # Extract the outer ZIP
+          OUTER_ZIP=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$OUTER_ZIP" ]; then
+            echo "No outer ZIP found."
+            exit 1
+          fi
+
+          echo "Extracting outer ZIP: $OUTER_ZIP"
+          unzip -q "$OUTER_ZIP" -d project
+
+          # Extract every ZIP found inside the extracted files
+          INNER_ZIP=$(find project -type f -iname "*.zip" | head -n 1)
+
+          if [ -n "$INNER_ZIP" ]; then
+            echo "Found inner ZIP: $INNER_ZIP"
+            mkdir -p project/android-project
+            unzip -q "$INNER_ZIP" -d project/android-project
+          fi
+
+          echo "All extracted files:"
           find project -maxdepth 8 -type f | sort
 
-      - name: Find Android project root
+      - name: Find Android project
         run: |
-          SETTINGS=$(find project -type f \( \
-            -name "settings.gradle.kts" -o \
-            -name "settings.gradle" \
-          \) | head -n 1)
+          SETTINGS=$(find project -type f -name "settings.gradle.kts" | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo ""
+            SETTINGS=$(find project -type f -name "settings.gradle" | head -n 1)
+          fi
+
+          if [ -z "$SETTINGS" ]; then
             echo "ERROR: Android project files were not found."
             echo ""
             echo "Files extracted from ZIP:"
@@ -77,10 +84,8 @@ jobs:
 
           PROJECT_DIR=$(dirname "$SETTINGS")
 
-          echo ""
           echo "Android project found:"
           echo "$PROJECT_DIR"
-          echo ""
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
@@ -91,21 +96,29 @@ jobs:
 
           echo ""
           echo "Project files:"
-          find "$PROJECT_DIR" -maxdepth 5 -type f | sort
+          find "$PROJECT_DIR" -maxdepth 4 -type f | sort
 
-          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
-             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
-            echo ""
-            echo "ERROR: app Gradle file not found."
-            exit 1
-          fi
+          echo ""
+          echo "Checking required files..."
 
-      - name: Fix Compose tab code
+          test -f "$PROJECT_DIR/settings.gradle.kts" || \
+          test -f "$PROJECT_DIR/settings.gradle"
+
+          test -f "$PROJECT_DIR/build.gradle.kts" || \
+          test -f "$PROJECT_DIR/build.gradle"
+
+          test -f "$PROJECT_DIR/app/build.gradle.kts" || \
+          test -f "$PROJECT_DIR/app/build.gradle"
+
+          echo "Android project structure OK."
+
+      - name: Fix unsupported Compose tab indicator
         run: |
           FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
 
           if [ ! -f "$FILE" ]; then
-            echo "ERROR: MainActivity.kt not found."
+            echo "MainActivity.kt not found at expected path."
+            find "$PROJECT_DIR/app/src/main/java" -type f | sort
             exit 1
           fi
 
@@ -113,39 +126,46 @@ jobs:
           import os
           import re
 
+          project_dir = os.environ["PROJECT_DIR"]
+
           file_path = os.path.join(
-              os.environ["PROJECT_DIR"],
+              project_dir,
               "app/src/main/java/com/finephoto/editor/MainActivity.kt"
           )
 
           with open(file_path, "r", encoding="utf-8") as f:
               text = f.read()
 
-          # Remove unsupported tab indicator block.
+          # Remove unsupported SecondaryIndicator usage.
           text = re.sub(
-              r'\s*indicator\s*=\s*\{[^{}]*TabRowDefaults\.SecondaryIndicator[^{}]*\{[^{}]*\}[^{}]*\}[^{}]*\}',
+              r'\s*indicator\s*=\s*\{.*?SecondaryIndicator.*?\}',
               '',
               text,
-              flags=re.DOTALL
+              flags=re.S
           )
 
-          # Remove any remaining unsupported references.
+          # Remove unsupported tabIndicatorOffset lines.
           text = re.sub(
-              r'(?m)^.*TabRowDefaults\.SecondaryIndicator.*$',
+              r'(?m)^[ \t]*.*tabIndicatorOffset\(.*\)[ \t]*\n?',
               '',
               text
           )
 
-          text = re.sub(
-              r'(?m)^.*tabIndicatorOffset\(.*$',
-              '',
-              text
+          # Remove remaining unsupported references.
+          text = text.replace(
+              "TabRowDefaults.SecondaryIndicator",
+              ""
+          )
+
+          text = text.replace(
+              "SecondaryIndicator",
+              ""
           )
 
           with open(file_path, "w", encoding="utf-8") as f:
               f.write(text)
 
-          print("Compose tab compatibility fix applied.")
+          print("Compose tab indicator compatibility fix applied.")
           PY
 
       - name: Build Debug APK
@@ -161,15 +181,13 @@ jobs:
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "ERROR: APK was not generated."
+            echo "APK was not generated."
+            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
           echo ""
-          echo "======================================"
-          echo "BUILD SUCCESSFUL"
-          echo "======================================"
-
+          echo "APK BUILD SUCCESSFUL"
           ls -lh "$APK"
 
       - name: Upload APK
