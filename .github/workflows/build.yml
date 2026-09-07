@@ -29,7 +29,10 @@ jobs:
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
       - name: Set up Gradle 8.2
         uses: gradle/actions/setup-gradle@v4
@@ -37,7 +40,10 @@ jobs:
           gradle-version: '8.2'
 
       - name: Find and extract ZIP
+        shell: bash
         run: |
+          set -e
+
           rm -rf project
           mkdir -p project
 
@@ -50,20 +56,22 @@ jobs:
           fi
 
           echo "Found ZIP: $ZIP_FILE"
+
           unzip -q "$ZIP_FILE" -d project
 
-          echo "Extracted project:"
-          find project -maxdepth 5 -type f | sort
+          echo "Extracted files:"
+          find project -maxdepth 6 -type f | sort
 
       - name: Locate Android project
+        shell: bash
         run: |
-          echo "Searching for settings.gradle.kts..."
+          set -e
 
           SETTINGS=$(find project -name "settings.gradle.kts" -type f | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
             echo "ERROR: settings.gradle.kts not found."
-            find project -maxdepth 6 -type f | sort
+            find project -maxdepth 8 -type f | sort
             exit 1
           fi
 
@@ -74,8 +82,11 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Fix Compose tab indicator
+      - name: Fix MainActivity compatibility
+        shell: bash
         run: |
+          set -e
+
           FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
 
           if [ ! -f "$FILE" ]; then
@@ -83,28 +94,138 @@ jobs:
             exit 1
           fi
 
-          echo "Applying Compose tab indicator compatibility fix..."
+          echo "Patching MainActivity.kt..."
 
-          sed -i 's/SecondaryIndicator/TabRowDefaults.SecondaryIndicator/g' "$FILE"
+          python3 <<'PY'
+          from pathlib import Path
 
-          echo "Checking tab indicator references:"
-          grep -n "SecondaryIndicator\|tabIndicatorOffset" "$FILE" || true
+          file = Path("project")
+
+          candidates = list(file.rglob("MainActivity.kt"))
+
+          if not candidates:
+              raise SystemExit("MainActivity.kt not found")
+
+          target = candidates[0]
+          text = target.read_text(encoding="utf-8")
+
+          # Remove imports for incompatible tab-indicator APIs.
+          lines = text.splitlines()
+          new_lines = []
+
+          for line in lines:
+              stripped = line.strip()
+
+              if stripped.startswith("import ") and (
+                  "SecondaryIndicator" in stripped
+                  or "tabIndicatorOffset" in stripped
+              ):
+                  continue
+
+              new_lines.append(line)
+
+          text = "\n".join(new_lines) + "\n"
+
+          # Remove any custom TabRow indicator lambda.
+          # This avoids Material2/Material3 API mismatch.
+          marker = "indicator = {"
+
+          while marker in text:
+              start = text.find(marker)
+
+              brace_start = text.find("{", start)
+
+              if brace_start == -1:
+                  break
+
+              depth = 0
+              end = None
+
+              for i in range(brace_start, len(text)):
+                  ch = text[i]
+
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+
+                      if depth == 0:
+                          end = i + 1
+                          break
+
+              if end is None:
+                  break
+
+              text = text[:start] + text[end:]
+
+          # Remove any remaining tabIndicatorOffset(...) modifier.
+          while ".tabIndicatorOffset(" in text:
+              start = text.find(".tabIndicatorOffset(")
+              paren = text.find("(", start)
+
+              depth = 0
+              end = None
+
+              for i in range(paren, len(text)):
+                  ch = text[i]
+
+                  if ch == "(":
+                      depth += 1
+                  elif ch == ")":
+                      depth -= 1
+
+                      if depth == 0:
+                          end = i + 1
+                          break
+
+              if end is None:
+                  break
+
+              text = text[:start] + text[end:]
+
+          # Remove any remaining SecondaryIndicator expression.
+          text = text.replace(
+              "TabRowDefaults.SecondaryIndicator",
+              "Box"
+          )
+
+          target.write_text(text, encoding="utf-8")
+
+          print(f"Patched: {target}")
+          PY
+
+          echo "Checking problematic references:"
+          grep -n \
+            "SecondaryIndicator\|tabIndicatorOffset" \
+            "$FILE" || true
 
       - name: Build Debug APK
+        shell: bash
         run: |
+          set -e
+
           cd "$PROJECT_DIR"
+
+          echo "Building project..."
           gradle --no-daemon clean assembleDebug
 
       - name: Verify APK
+        shell: bash
         run: |
+          set -e
+
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK was not generated."
+            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK successfully generated:"
+          echo "===================================="
+          echo "APK BUILD SUCCESSFUL"
+          echo "===================================="
+
           ls -lh "$APK"
 
       - name: Upload APK
