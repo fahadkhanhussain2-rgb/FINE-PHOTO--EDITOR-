@@ -2,9 +2,11 @@ name: Build FINE Photo Editor
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -12,20 +14,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
@@ -35,15 +36,15 @@ jobs:
         with:
           gradle-version: '8.2'
 
-      - name: Extract Android project
+      - name: Find and extract ZIP
         run: |
           rm -rf project
-          mkdir project
+          mkdir -p project
 
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found"
+            echo "ERROR: No ZIP file found in repository."
             ls -la
             exit 1
           fi
@@ -51,32 +52,63 @@ jobs:
           echo "Found ZIP: $ZIP_FILE"
           unzip -q "$ZIP_FILE" -d project
 
-          echo "Project files:"
+          echo "Extracted project:"
           find project -maxdepth 5 -type f | sort
+
+      - name: Locate Android project
+        run: |
+          echo "Searching for settings.gradle.kts..."
+
+          SETTINGS=$(find project -name "settings.gradle.kts" -type f | head -n 1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle.kts not found."
+            find project -maxdepth 6 -type f | sort
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "Android project found at:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Fix Compose tab indicator
         run: |
-          FILE=project/app/src/main/java/com/finephoto/editor/MainActivity.kt
+          FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
 
-          echo "Fixing tab indicator..."
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: MainActivity.kt not found."
+            exit 1
+          fi
+
+          echo "Applying Compose tab indicator compatibility fix..."
 
           sed -i 's/SecondaryIndicator/TabRowDefaults.SecondaryIndicator/g' "$FILE"
 
-          echo "Checking remaining tab indicator references:"
+          echo "Checking tab indicator references:"
           grep -n "SecondaryIndicator\|tabIndicatorOffset" "$FILE" || true
 
       - name: Build Debug APK
         run: |
-          cd project
+          cd "$PROJECT_DIR"
           gradle --no-daemon clean assembleDebug
 
       - name: Verify APK
         run: |
-          test -f project/app/build/outputs/apk/debug/app-debug.apk
-          ls -lh project/app/build/outputs/apk/debug/app-debug.apk
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK successfully generated:"
+          ls -lh "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: FinePhotoEditor-Debug
-          path: project/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
