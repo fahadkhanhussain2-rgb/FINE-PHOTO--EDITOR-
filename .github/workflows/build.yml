@@ -29,10 +29,7 @@ jobs:
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Set up Gradle 8.2
         uses: gradle/actions/setup-gradle@v4
@@ -40,7 +37,6 @@ jobs:
           gradle-version: '8.2'
 
       - name: Find and extract ZIP
-        shell: bash
         run: |
           set -e
 
@@ -50,7 +46,7 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository."
+            echo "ERROR: No ZIP file found."
             ls -la
             exit 1
           fi
@@ -63,7 +59,6 @@ jobs:
           find project -maxdepth 6 -type f | sort
 
       - name: Locate Android project
-        shell: bash
         run: |
           set -e
 
@@ -77,13 +72,12 @@ jobs:
 
           PROJECT_DIR=$(dirname "$SETTINGS")
 
-          echo "Android project found at:"
+          echo "Android project:"
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Fix MainActivity compatibility
-        shell: bash
+      - name: Fix MainActivity
         run: |
           set -e
 
@@ -94,123 +88,58 @@ jobs:
             exit 1
           fi
 
-          echo "Patching MainActivity.kt..."
+          echo "Applying Compose compatibility fixes..."
 
-          python3 <<'PY'
-          from pathlib import Path
+          # Remove problematic SecondaryIndicator usage.
+          sed -i 's/TabRowDefaults\.SecondaryIndicator/TabRowDefaults.Indicator/g' "$FILE"
 
-          file = Path("project")
+          # Remove tabIndicatorOffset usage completely.
+          sed -i 's/\.tabIndicatorOffset([^)]*)//' "$FILE"
 
-          candidates = list(file.rglob("MainActivity.kt"))
+          echo "MainActivity fixes applied."
 
-          if not candidates:
-              raise SystemExit("MainActivity.kt not found")
+      - name: Enable experimental Material APIs
+        run: |
+          set -e
 
-          target = candidates[0]
-          text = target.read_text(encoding="utf-8")
+          FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
 
-          # Remove imports for incompatible tab-indicator APIs.
-          lines = text.splitlines()
-          new_lines = []
+          python3 - "$FILE" <<'PY'
+          import sys
 
-          for line in lines:
-              stripped = line.strip()
+          path = sys.argv[1]
 
-              if stripped.startswith("import ") and (
-                  "SecondaryIndicator" in stripped
-                  or "tabIndicatorOffset" in stripped
-              ):
-                  continue
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
 
-              new_lines.append(line)
+          annotation = "@file:OptIn(androidx.compose.material.ExperimentalMaterialApi::class)"
 
-          text = "\n".join(new_lines) + "\n"
+          if annotation not in text:
+              text = annotation + "\n\n" + text
 
-          # Remove any custom TabRow indicator lambda.
-          # This avoids Material2/Material3 API mismatch.
-          marker = "indicator = {"
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
 
-          while marker in text:
-              start = text.find(marker)
-
-              brace_start = text.find("{", start)
-
-              if brace_start == -1:
-                  break
-
-              depth = 0
-              end = None
-
-              for i in range(brace_start, len(text)):
-                  ch = text[i]
-
-                  if ch == "{":
-                      depth += 1
-                  elif ch == "}":
-                      depth -= 1
-
-                      if depth == 0:
-                          end = i + 1
-                          break
-
-              if end is None:
-                  break
-
-              text = text[:start] + text[end:]
-
-          # Remove any remaining tabIndicatorOffset(...) modifier.
-          while ".tabIndicatorOffset(" in text:
-              start = text.find(".tabIndicatorOffset(")
-              paren = text.find("(", start)
-
-              depth = 0
-              end = None
-
-              for i in range(paren, len(text)):
-                  ch = text[i]
-
-                  if ch == "(":
-                      depth += 1
-                  elif ch == ")":
-                      depth -= 1
-
-                      if depth == 0:
-                          end = i + 1
-                          break
-
-              if end is None:
-                  break
-
-              text = text[:start] + text[end:]
-
-          # Remove any remaining SecondaryIndicator expression.
-          text = text.replace(
-              "TabRowDefaults.SecondaryIndicator",
-              "Box"
-          )
-
-          target.write_text(text, encoding="utf-8")
-
-          print(f"Patched: {target}")
+          print("Experimental Material API enabled.")
           PY
 
-          echo "Checking problematic references:"
-          grep -n \
-            "SecondaryIndicator\|tabIndicatorOffset" \
-            "$FILE" || true
+      - name: Check source
+        run: |
+          echo "Checking MainActivity..."
+          grep -n "ExperimentalMaterialApi\|SecondaryIndicator\|tabIndicatorOffset" \
+            "$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt" || true
 
       - name: Build Debug APK
-        shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
           echo "Building project..."
+
           gradle --no-daemon clean assembleDebug
 
       - name: Verify APK
-        shell: bash
         run: |
           set -e
 
@@ -218,14 +147,13 @@ jobs:
 
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK was not generated."
-            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "===================================="
+          echo ""
+          echo "======================================"
           echo "APK BUILD SUCCESSFUL"
-          echo "===================================="
-
+          echo "======================================"
           ls -lh "$APK"
 
       - name: Upload APK
