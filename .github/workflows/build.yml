@@ -31,18 +31,13 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Set up Gradle 8.2
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.2'
 
-      - name: Find and extract ZIP
+      - name: Find ZIP
         run: |
-          set -e
-
-          rm -rf project
-          mkdir -p project
-
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
@@ -51,7 +46,13 @@ jobs:
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
+          echo "ZIP found: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - name: Extract ZIP
+        run: |
+          rm -rf project
+          mkdir -p project
 
           unzip -q "$ZIP_FILE" -d project
 
@@ -60,13 +61,10 @@ jobs:
 
       - name: Locate Android project
         run: |
-          set -e
-
           SETTINGS=$(find project -name "settings.gradle.kts" -type f | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: settings.gradle.kts not found."
-            find project -maxdepth 8 -type f | sort
+            echo "ERROR: settings.gradle.kts was not found."
             exit 1
           fi
 
@@ -77,57 +75,19 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Fix MainActivity
+      - name: Check source code
         run: |
-          set -e
+          MAIN="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
 
-          FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
-
-          if [ ! -f "$FILE" ]; then
+          if [ ! -f "$MAIN" ]; then
             echo "ERROR: MainActivity.kt not found."
             exit 1
           fi
 
-          echo "Applying Compose compatibility fixes..."
+          echo "MainActivity.kt found."
+          echo "Checking suspicious broken lines..."
 
-          # Remove problematic SecondaryIndicator usage.
-          sed -i 's/TabRowDefaults\.SecondaryIndicator/TabRowDefaults.Indicator/g' "$FILE"
-
-          # Remove tabIndicatorOffset usage completely.
-          sed -i 's/\.tabIndicatorOffset([^)]*)//' "$FILE"
-
-          echo "MainActivity fixes applied."
-
-      - name: Enable experimental Material APIs
-        run: |
-          set -e
-
-          FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
-
-          python3 - "$FILE" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          annotation = "@file:OptIn(androidx.compose.material.ExperimentalMaterialApi::class)"
-
-          if annotation not in text:
-              text = annotation + "\n\n" + text
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(text)
-
-          print("Experimental Material API enabled.")
-          PY
-
-      - name: Check source
-        run: |
-          echo "Checking MainActivity..."
-          grep -n "ExperimentalMaterialApi\|SecondaryIndicator\|tabIndicatorOffset" \
-            "$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt" || true
+          sed -n '555,590p' "$MAIN"
 
       - name: Build Debug APK
         run: |
@@ -141,8 +101,6 @@ jobs:
 
       - name: Verify APK
         run: |
-          set -e
-
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
@@ -150,10 +108,10 @@ jobs:
             exit 1
           fi
 
-          echo ""
           echo "======================================"
           echo "APK BUILD SUCCESSFUL"
           echo "======================================"
+
           ls -lh "$APK"
 
       - name: Upload APK
