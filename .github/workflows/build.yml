@@ -56,46 +56,103 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d project
 
-          echo "Extracted files:"
-          find project -maxdepth 6 -type f | sort
+          echo "ZIP contents:"
+          find project -maxdepth 8 -type f | sort
 
-      - name: Locate Android project
+      - name: Find Android project root
         run: |
-          SETTINGS=$(find project -name "settings.gradle.kts" -type f | head -n 1)
+          SETTINGS=$(find project -type f \( \
+            -name "settings.gradle.kts" -o \
+            -name "settings.gradle" \
+          \) | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: settings.gradle.kts was not found."
+            echo ""
+            echo "ERROR: Android project files were not found."
+            echo ""
+            echo "Files extracted from ZIP:"
+            find project -maxdepth 10 -type f | sort
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
 
-          echo "Android project:"
+          echo ""
+          echo "Android project found:"
           echo "$PROJECT_DIR"
+          echo ""
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Check source code
+      - name: Check Android project
         run: |
-          MAIN="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
 
-          if [ ! -f "$MAIN" ]; then
+          echo ""
+          echo "Project files:"
+          find "$PROJECT_DIR" -maxdepth 5 -type f | sort
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo ""
+            echo "ERROR: app Gradle file not found."
+            exit 1
+          fi
+
+      - name: Fix Compose tab code
+        run: |
+          FILE="$PROJECT_DIR/app/src/main/java/com/finephoto/editor/MainActivity.kt"
+
+          if [ ! -f "$FILE" ]; then
             echo "ERROR: MainActivity.kt not found."
             exit 1
           fi
 
-          echo "MainActivity.kt found."
-          echo "Checking suspicious broken lines..."
+          python3 <<'PY'
+          import os
+          import re
 
-          sed -n '555,590p' "$MAIN"
+          file_path = os.path.join(
+              os.environ["PROJECT_DIR"],
+              "app/src/main/java/com/finephoto/editor/MainActivity.kt"
+          )
+
+          with open(file_path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # Remove unsupported tab indicator block.
+          text = re.sub(
+              r'\s*indicator\s*=\s*\{[^{}]*TabRowDefaults\.SecondaryIndicator[^{}]*\{[^{}]*\}[^{}]*\}[^{}]*\}',
+              '',
+              text,
+              flags=re.DOTALL
+          )
+
+          # Remove any remaining unsupported references.
+          text = re.sub(
+              r'(?m)^.*TabRowDefaults\.SecondaryIndicator.*$',
+              '',
+              text
+          )
+
+          text = re.sub(
+              r'(?m)^.*tabIndicatorOffset\(.*$',
+              '',
+              text
+          )
+
+          with open(file_path, "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print("Compose tab compatibility fix applied.")
+          PY
 
       - name: Build Debug APK
         run: |
-          set -e
-
           cd "$PROJECT_DIR"
 
-          echo "Building project..."
+          echo "Building APK..."
 
           gradle --no-daemon clean assembleDebug
 
@@ -108,8 +165,9 @@ jobs:
             exit 1
           fi
 
+          echo ""
           echo "======================================"
-          echo "APK BUILD SUCCESSFUL"
+          echo "BUILD SUCCESSFUL"
           echo "======================================"
 
           ls -lh "$APK"
